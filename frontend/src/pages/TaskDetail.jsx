@@ -1,0 +1,418 @@
+import { useEffect, useState } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import dayjs from 'dayjs';
+import { fetchTask, downloadResults, askQuestion } from '../api.js';
+import QnASection from '../components/QnASection.jsx';
+import { renderInlineMarkdown } from '../utils/markdown.jsx';
+
+const Section = ({ title, children }) => (
+  <div className="analysis-card">
+    <div className="analysis-card__header">
+      <h3>{title}</h3>
+    </div>
+    <div>{children}</div>
+  </div>
+);
+
+const Pill = ({ children }) => <span className="pill">{children}</span>;
+
+const formatUserAnswer = (text) => {
+  if (!text) return <p className="muted">No answer provided.</p>;
+  
+  // Split by double newlines first (paragraphs)
+  const paragraphs = text.split(/\n\n+/).filter(p => p.trim());
+  
+  return (
+    <div className="formatted-text">
+      {paragraphs.map((paragraph, pIdx) => {
+        const trimmed = paragraph.trim();
+        
+        // Check for numbered lists
+        if (/^\d+[\.\)]\s/.test(trimmed)) {
+          const lines = trimmed.split(/\n/).filter(l => l.trim());
+          return (
+            <div key={pIdx} className="numbered-list">
+              {lines.map((line, lIdx) => {
+                // Remove the number prefix for parsing
+                const lineContent = line.replace(/^\d+[\.\)]\s*/, '');
+                return (
+                  <p key={lIdx} className="numbered-point">
+                    {renderInlineMarkdown(lineContent.trim())}
+                  </p>
+                );
+              })}
+            </div>
+          );
+        }
+        
+        // Check for bullet lists
+        if (/^[-•*]\s/.test(trimmed)) {
+          const lines = trimmed.split(/\n/).filter(l => l.trim());
+          return (
+            <div key={pIdx} className="bullet-list">
+              {lines.map((line, lIdx) => {
+                // Remove the bullet prefix for parsing
+                const lineContent = line.replace(/^[-•*]\s*/, '');
+                return (
+                  <p key={lIdx} className="bullet-point">
+                    {renderInlineMarkdown(lineContent.trim())}
+                  </p>
+                );
+              })}
+            </div>
+          );
+        }
+        
+        // Regular paragraph - split by sentences for better formatting
+        const sentences = trimmed.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+        return (
+          <div key={pIdx} className="paragraph-group">
+            {sentences.map((sentence, sIdx) => (
+              <p key={sIdx} className="answer-paragraph">
+                {renderInlineMarkdown(sentence.trim())}
+              </p>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const TaskDetailPage = () => {
+  const { taskId } = useParams();
+  const navigate = useNavigate();
+  const [task, setTask] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const loadTask = async () => {
+    setLoading(true);
+    try {
+      const data = await fetchTask(taskId);
+      setTask(data);
+    } catch (error) {
+      alert(error.response?.data?.error || error.message);
+      navigate('/');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadTask();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId]);
+
+  if (loading) {
+    return <p>Loading analysis...</p>;
+  }
+
+  if (!task) {
+    return null;
+  }
+
+  const successes = task.results?.filter((r) => r.status === 'success') || [];
+  const comparison = task.comparison && !task.comparison.error ? task.comparison : null;
+
+  return (
+    <div className="detail-page">
+      <button className="btn-back-dashboard" onClick={() => navigate('/')}>
+        <span className="back-icon">←</span>
+        <span>Back to Dashboard</span>
+      </button>
+      <div className="detail-header">
+        <div>
+          <h2>{task.name || `Task #${task.id}`}</h2>
+          <p className="muted">
+            {dayjs(task.created_at).format('MMM D, YYYY HH:mm')} · Domain:{' '}
+            {task.domain?.toUpperCase()}
+          </p>
+        </div>
+        <div className="detail-actions">
+          <button className="btn btn-secondary" onClick={() => downloadResults(task.id, 'json')}>
+            Download JSON
+          </button>
+          <button className="btn btn-secondary" onClick={() => downloadResults(task.id, 'csv')}>
+            Download CSV
+          </button>
+          <button className="btn btn-secondary" onClick={() => downloadResults(task.id, 'txt')}>
+            Download TXT
+          </button>
+        </div>
+      </div>
+
+      {successes.map((result, idx) => (
+        <Section key={result.url || idx} title={`Website ${idx + 1}: ${result.url || 'N/A'}`}>
+          <div className="pill-row">
+            <Pill>Status: {result.status}</Pill>
+          </div>
+          <div style={{ marginTop: '16px' }}>
+            <button 
+              className="btn btn-primary" 
+              onClick={() => navigate(`/task/${task.id}/data/${idx}`)}
+            >
+              📊 View Extracted Data
+            </button>
+            <p className="hint" style={{ marginTop: '8px' }}>
+              {Object.keys(result.data?.extracted_data || {}).length} fields extracted
+            </p>
+          </div>
+        </Section>
+      ))}
+
+      {task.results?.some((r) => r.status === 'error') && (
+        <Section title="Errors">
+          {task.results
+            .filter((r) => r.status === 'error')
+            .map((error, idx) => (
+              <p key={idx} className="error-text">
+                {error.url}: {error.error}
+              </p>
+            ))}
+        </Section>
+      )}
+
+      {successes.map((result, idx) => {
+        const analysis = result.data?.analysis;
+        const legacyInsights = result.data?.insights;
+        if (!analysis && !legacyInsights) return null;
+        return (
+          <Section key={`analysis-${idx}`} title={`Insights for ${result.url || 'Website'}`}>
+            {analysis ? (
+              <>
+                <p className="summary">{renderInlineMarkdown(analysis.summary)}</p>
+                <div className="pill-row">
+                  {analysis.key_points?.map((point, id) => (
+                    <Pill key={id}>{point}</Pill>
+                  ))}
+                </div>
+                <h4>Insights</h4>
+                <ul>
+                  {analysis.insights?.map((item, id) => (
+                    <li key={id}>{renderInlineMarkdown(item)}</li>
+                  ))}
+                </ul>
+                {analysis.opportunities?.length > 0 && (
+                  <>
+                    <h4>Opportunities</h4>
+                    <ul>
+                      {analysis.opportunities.map((item, id) => (
+                        <li key={id}>{renderInlineMarkdown(item)}</li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+                {analysis.risks?.length > 0 && (
+                  <>
+                    <h4>Risks</h4>
+                    <ul>
+                      {analysis.risks.map((item, id) => (
+                        <li key={id}>{renderInlineMarkdown(item)}</li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </>
+            ) : (
+              <pre style={{ whiteSpace: 'pre-wrap' }}>{legacyInsights}</pre>
+            )}
+          </Section>
+        );
+      })}
+
+      {/* Combined User Request Answer at the end */}
+      {task.comparison && task.comparison.user_request_answer && (
+        <Section title="User Request Answer (Combined Analysis)">
+          <div className="user-answer-formatted">
+            {formatUserAnswer(task.comparison.user_request_answer)}
+          </div>
+        </Section>
+      )}
+      
+      {/* Fallback: If no comparison but individual answers exist, combine them */}
+      {(!task.comparison || !task.comparison.user_request_answer) && successes.length > 0 && (
+        <Section title="User Request Answer (Combined Analysis)">
+          <div className="user-answer-formatted">
+            {successes.map((result, idx) => {
+              const analysis = result.data?.analysis;
+              if (!analysis?.user_request_answer) return null;
+              return (
+                <div key={idx} style={{ marginBottom: idx < successes.length - 1 ? '24px' : '0' }}>
+                  {successes.length > 1 && (
+                    <p style={{ fontWeight: 600, marginBottom: '8px', color: '#6366f1' }}>
+                      From {result.url || `Website ${idx + 1}`}:
+                    </p>
+                  )}
+                  {formatUserAnswer(analysis.user_request_answer)}
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      )}
+
+      {task.comparison && !task.comparison.error && (
+        <Section title="Multi-Website Comparison">
+          {task.comparison.summary && <p className="summary">{renderInlineMarkdown(task.comparison.summary)}</p>}
+          
+          {task.comparison.user_request_answer && (
+            <>
+              <h4>What Should We Extract? (Cross-Website Analysis)</h4>
+              <div className="user-answer-formatted">
+                {formatUserAnswer(task.comparison.user_request_answer)}
+              </div>
+            </>
+          )}
+          
+          {task.comparison.extraction_recommendations && (
+            <div className="extraction-recommendations">
+              <h4>Extraction Recommendations</h4>
+              {task.comparison.extraction_recommendations.common_fields?.length > 0 && (
+                <div style={{ marginBottom: '16px' }}>
+                  <h5>Common Fields (Available on All Sites)</h5>
+                  <div className="pill-row">
+                    {task.comparison.extraction_recommendations.common_fields.map((field, idx) => (
+                      <Pill key={idx}>{field}</Pill>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {task.comparison.extraction_recommendations.unique_fields && Object.keys(task.comparison.extraction_recommendations.unique_fields).length > 0 && (
+                <div style={{ marginBottom: '16px' }}>
+                  <h5>Unique Fields (Site-Specific)</h5>
+                  {Object.entries(task.comparison.extraction_recommendations.unique_fields).map(([url, fields], idx) => (
+                    <div key={idx} style={{ marginBottom: '8px' }}>
+                      <strong>{url}:</strong>
+                      <div className="pill-row" style={{ marginTop: '4px' }}>
+                        {fields.map((field, fIdx) => (
+                          <Pill key={fIdx}>{field}</Pill>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {task.comparison.extraction_recommendations.best_practices?.length > 0 && (
+                <div>
+                  <h5>Best Practices</h5>
+                  <ul>
+                    {task.comparison.extraction_recommendations.best_practices.map((practice, idx) => (
+                      <li key={idx}>{practice}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+          
+          <div className="comparison-grid">
+            <div>
+              <h4>Similarities</h4>
+              {task.comparison.similarities?.length ? (
+                <ul>
+                  {task.comparison.similarities.map((item, idx) => (
+                    <li key={idx}>{renderInlineMarkdown(item)}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted">Not available.</p>
+              )}
+            </div>
+            <div>
+              <h4>Differences</h4>
+              {task.comparison.differences?.length ? (
+                <ul>
+                  {task.comparison.differences.map((item, idx) => (
+                    <li key={idx}>{renderInlineMarkdown(item)}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted">Not available.</p>
+              )}
+            </div>
+          </div>
+          {task.comparison.comparison_table && (
+            <div className="comparison-visual">
+              <h4>Comparison Metrics</h4>
+              <div className="comparison-table-wrapper">
+                <table className="comparison-table">
+                  <thead>
+                    <tr>
+                      <th>Metric</th>
+                      {successes.map((result, idx) => (
+                        <th key={idx}>Website {idx + 1}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {task.comparison.comparison_table.metrics?.map((metric, mIdx) => (
+                      <tr key={mIdx}>
+                        <td className="metric-name">{metric}</td>
+                        {successes.map((result, rIdx) => {
+                          // Try different possible structures
+                          const urlKey = `website_${rIdx + 1}`;
+                          const row = task.comparison.comparison_table.rows?.find(
+                            r => r.metric === metric
+                          );
+                          let value = 'N/A';
+                          if (row?.values) {
+                            value = row.values[urlKey] || row.values[result.url] || Object.values(row.values)[rIdx] || 'N/A';
+                          } else if (task.comparison.comparison_table[`website_${rIdx + 1}`]) {
+                            const websiteData = task.comparison.comparison_table[`website_${rIdx + 1}`];
+                            value = websiteData[mIdx] || 'N/A';
+                          }
+                          return (
+                            <td key={rIdx} className="metric-value">
+                              {value}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          
+          {task.comparison.websites && Object.keys(task.comparison.websites).length > 0 && (
+            <div className="comparison-scores">
+              <h4>Quick Scores</h4>
+              <div className="score-cards">
+                {Object.entries(task.comparison.websites).map(([url, analysis], idx) => (
+                  <div key={url} className="score-card">
+                    <div className="score-header">
+                      <span className="score-label">Website {idx + 1}</span>
+                      {analysis.score && (
+                        <span className="score-value">{analysis.score}/10</span>
+                      )}
+                    </div>
+                    {analysis.best_for && (
+                      <p className="score-best-for">{analysis.best_for}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {task.comparison.recommendation && (
+            <>
+              <h4>Recommendation</h4>
+              <p>{renderInlineMarkdown(task.comparison.recommendation)}</p>
+            </>
+          )}
+        </Section>
+      )}
+      {task.comparison?.error && (
+        <Section title="Multi-Website Comparison">
+          <p className="error-text">Comparison generation failed: {task.comparison.error}</p>
+        </Section>
+      )}
+
+      <QnASection taskId={task.id} onAsk={askQuestion} />
+    </div>
+  );
+};
+
+export default TaskDetailPage;
+

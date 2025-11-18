@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Database
+*.sqlite
+*.db
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Playwright
+.playwright/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Node / React
+node_modules/
+frontend/node_modules/
+frontend/dist/
+npm-debug.log
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
