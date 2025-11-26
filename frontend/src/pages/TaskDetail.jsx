@@ -19,8 +19,109 @@ const Pill = ({ children }) => <span className="pill">{children}</span>;
 const formatUserAnswer = (text) => {
   if (!text) return <p className="muted">No answer provided.</p>;
   
+  // Convert to string if it's not already
+  if (typeof text !== 'string') {
+    if (Array.isArray(text)) {
+      // If array, join elements (handling both strings and objects)
+      text = text.map(item => {
+        if (typeof item === 'string') return item;
+        if (typeof item === 'object' && item !== null) {
+          // Try to extract text from object items
+          return item.text || item.answer || item.content || item.message || JSON.stringify(item);
+        }
+        return String(item);
+      }).join('\n');
+    } else if (typeof text === 'object' && text !== null) {
+      // If it's an object, try to extract meaningful text content
+      // Check for common text properties first
+      if (text.text) {
+        text = text.text;
+      } else if (text.answer) {
+        text = text.answer;
+      } else if (text.content) {
+        text = text.content;
+      } else if (text.message) {
+        text = text.message;
+      } else if (text.description) {
+        text = text.description;
+      } else {
+        // Try to extract all string values from the object
+        const stringValues = [];
+        const extractStrings = (obj, depth = 0) => {
+          if (depth > 2) return; // Prevent infinite recursion
+          for (const key in obj) {
+            if (obj.hasOwnProperty(key)) {
+              const value = obj[key];
+              if (typeof value === 'string' && value.trim()) {
+                stringValues.push(value);
+              } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                extractStrings(value, depth + 1);
+              } else if (Array.isArray(value)) {
+                value.forEach(item => {
+                  if (typeof item === 'string' && item.trim()) {
+                    stringValues.push(item);
+                  }
+                });
+              }
+            }
+          }
+        };
+        extractStrings(text);
+        text = stringValues.length > 0 ? stringValues.join('\n\n') : JSON.stringify(text, null, 2);
+      }
+    } else {
+      text = String(text);
+    }
+  }
+  
+  // Normalize whitespace: replace multiple spaces with single space, preserve newlines
+  text = text.replace(/[ \t]+/g, ' ');
+  
   // Split by double newlines first (paragraphs)
-  const paragraphs = text.split(/\n\n+/).filter(p => p.trim());
+  let paragraphs = text.split(/\n\n+/).filter(p => p.trim());
+  
+  // If no double newlines found, try to detect paragraph breaks
+  if (paragraphs.length === 1) {
+    if (text.includes('\n')) {
+      // Split on single newlines that appear to be paragraph breaks
+      // Pattern: end of sentence (period/question/exclamation) followed by newline and capital letter
+      paragraphs = text.split(/\n(?=[A-Z])/).filter(p => p.trim());
+      
+      // If still one paragraph, try splitting on newlines that come after sentence endings
+      if (paragraphs.length === 1) {
+        paragraphs = text.split(/(?<=[.!?])\n+/).filter(p => p.trim());
+      }
+    } else {
+      // No newlines at all - try to detect natural paragraph breaks
+      // Look for: sentence ending + space + capital letter (likely new sentence/paragraph)
+      // But be careful not to split mid-sentence (e.g., "Dr. Smith" or "U.S.A.")
+      paragraphs = text.split(/(?<=[.!?])\s+(?=[A-Z][a-z])/).filter(p => p.trim());
+    }
+  }
+  
+  // Further split very long paragraphs (more than 250 chars) that might contain multiple distinct ideas
+  // Look for patterns that suggest topic shifts
+  paragraphs = paragraphs.flatMap(para => {
+    if (para.length > 250) {
+      // Check if paragraph contains multiple distinct topics
+      // Pattern: sentence ending followed by a capitalized word that might start a new topic
+      // Common topic starters: "The", "However", "Neither", "It", algorithm names, etc.
+      const topicMarkers = /(?<=[.!?])\s+(The|However|Neither|It|This|That|These|Those|Bellman-Ford|Dijkstra|Formal|Practical|Applications?|Use cases?|Should be|Can be|Must be|Will be|Is|Are|Was|Were)\s+[A-Z]/i;
+      
+      if (topicMarkers.test(para)) {
+        // Split on sentence endings that are followed by topic markers
+        const splits = para.split(/(?<=[.!?])\s+(?=(?:The|However|Neither|It|This|That|These|Those|Bellman-Ford|Dijkstra|Formal|Practical|Applications?|Use cases?|Should be|Can be|Must be|Will be|Is|Are|Was|Were)\s+[A-Z])/i);
+        return splits.length > 1 ? splits.filter(s => s.trim()) : [para];
+      }
+      
+      // If no topic markers, split on sentence endings in very long text
+      if (para.length > 400) {
+        const sentences = para.split(/(?<=[.!?])\s+(?=[A-Z][a-z])/).filter(s => s.trim());
+        return sentences.length > 1 ? sentences : [para];
+      }
+    }
+    return [para];
+  });
   
   return (
     <div className="formatted-text">
@@ -84,6 +185,7 @@ const TaskDetailPage = () => {
   const navigate = useNavigate();
   const [task, setTask] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
 
   const loadTask = async () => {
     setLoading(true);
@@ -220,16 +322,7 @@ const TaskDetailPage = () => {
         );
       })}
 
-      {/* Combined User Request Answer at the end */}
-      {task.comparison && task.comparison.user_request_answer && (
-        <Section title="User Request Answer (Combined Analysis)">
-          <div className="user-answer-formatted">
-            {formatUserAnswer(task.comparison.user_request_answer)}
-          </div>
-        </Section>
-      )}
-      
-      {/* Fallback: If no comparison but individual answers exist, combine them */}
+      {/* Fallback: If no comparison but individual answers exist, show them */}
       {(!task.comparison || !task.comparison.user_request_answer) && successes.length > 0 && (
         <Section title="User Request Answer (Combined Analysis)">
           <div className="user-answer-formatted">
@@ -262,47 +355,6 @@ const TaskDetailPage = () => {
                 {formatUserAnswer(task.comparison.user_request_answer)}
               </div>
             </>
-          )}
-          
-          {task.comparison.extraction_recommendations && (
-            <div className="extraction-recommendations">
-              <h4>Extraction Recommendations</h4>
-              {task.comparison.extraction_recommendations.common_fields?.length > 0 && (
-                <div style={{ marginBottom: '16px' }}>
-                  <h5>Common Fields (Available on All Sites)</h5>
-                  <div className="pill-row">
-                    {task.comparison.extraction_recommendations.common_fields.map((field, idx) => (
-                      <Pill key={idx}>{field}</Pill>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {task.comparison.extraction_recommendations.unique_fields && Object.keys(task.comparison.extraction_recommendations.unique_fields).length > 0 && (
-                <div style={{ marginBottom: '16px' }}>
-                  <h5>Unique Fields (Site-Specific)</h5>
-                  {Object.entries(task.comparison.extraction_recommendations.unique_fields).map(([url, fields], idx) => (
-                    <div key={idx} style={{ marginBottom: '8px' }}>
-                      <strong>{url}:</strong>
-                      <div className="pill-row" style={{ marginTop: '4px' }}>
-                        {fields.map((field, fIdx) => (
-                          <Pill key={fIdx}>{field}</Pill>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {task.comparison.extraction_recommendations.best_practices?.length > 0 && (
-                <div>
-                  <h5>Best Practices</h5>
-                  <ul>
-                    {task.comparison.extraction_recommendations.best_practices.map((practice, idx) => (
-                      <li key={idx}>{practice}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
           )}
           
           <div className="comparison-grid">
@@ -406,6 +458,66 @@ const TaskDetailPage = () => {
       {task.comparison?.error && (
         <Section title="Multi-Website Comparison">
           <p className="error-text">Comparison generation failed: {task.comparison.error}</p>
+        </Section>
+      )}
+
+      {/* Technical Details Section - Collapsible */}
+      {task.comparison && !task.comparison.error && task.comparison.extraction_recommendations && (
+        <Section title="Technical Details">
+          <div className="technical-details">
+            <button
+              className="technical-details-toggle"
+              onClick={() => setShowTechnicalDetails(!showTechnicalDetails)}
+              type="button"
+            >
+              <span>{showTechnicalDetails ? '▼' : '▶'}</span>
+              <span>Extraction Recommendations</span>
+              <span className="technical-details-badge">Developer Info</span>
+            </button>
+            
+            {showTechnicalDetails && (
+              <div className="technical-details-content">
+                {task.comparison.extraction_recommendations.common_fields?.length > 0 && (
+                  <div className="technical-section">
+                    <h5>Common Fields (Available on All Sites)</h5>
+                    <div className="pill-row">
+                      {task.comparison.extraction_recommendations.common_fields.map((field, idx) => (
+                        <Pill key={idx}>{field}</Pill>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                
+                {task.comparison.extraction_recommendations.unique_fields && 
+                 Object.keys(task.comparison.extraction_recommendations.unique_fields).length > 0 && (
+                  <div className="technical-section">
+                    <h5>Unique Fields (Site-Specific)</h5>
+                    {Object.entries(task.comparison.extraction_recommendations.unique_fields).map(([url, fields], idx) => (
+                      <div key={idx} className="unique-field-item">
+                        <div className="unique-field-url">{url}</div>
+                        <div className="pill-row" style={{ marginTop: '8px' }}>
+                          {fields.map((field, fIdx) => (
+                            <Pill key={fIdx}>{field}</Pill>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                
+                {task.comparison.extraction_recommendations.best_practices?.length > 0 && (
+                  <div className="technical-section">
+                    <h5>Best Practices</h5>
+                    <ul className="best-practices-list">
+                      {task.comparison.extraction_recommendations.best_practices.map((practice, idx) => (
+                        <li key={idx}>{renderInlineMarkdown(practice)}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </Section>
       )}
 

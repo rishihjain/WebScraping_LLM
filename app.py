@@ -433,6 +433,203 @@ def update_task_tags(task_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/tasks/<int:task_id>/rerun', methods=['POST'])
+def rerun_task(task_id):
+    """Re-run analysis for an existing task."""
+    try:
+        task = db.get_task(task_id)
+        if not task:
+            return jsonify({'error': 'Task not found'}), 404
+        
+        data = request.json or {}
+
+        def normalize_urls(value):
+            if not value:
+                return []
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if isinstance(item, str) and item.strip()]
+            if isinstance(value, str):
+                return [item.strip() for item in value.splitlines() if item.strip()]
+            return []
+
+        def normalize_tags(value):
+            if not value:
+                return []
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+            if isinstance(value, str):
+                return [item.strip() for item in value.split(',') if item.strip()]
+            return []
+
+        override_urls = normalize_urls(data.get('urls'))
+        urls = override_urls if override_urls else (task.get('urls') or [])
+        if not urls:
+            return jsonify({'error': 'No URLs found in task'}), 400
+
+        instruction_override = data.get('instruction')
+        instruction = (
+            instruction_override.strip()
+            if isinstance(instruction_override, str) and instruction_override.strip()
+            else task.get('instruction', 'Extract all text content from the page')
+        )
+
+        domain_override = data.get('domain')
+        domain_candidate = (
+            domain_override.strip()
+            if isinstance(domain_override, str) and domain_override.strip()
+            else task.get('domain', 'general')
+        )
+        domain = domain_candidate if domain_candidate in DomainAnalyzer.DOMAINS else 'general'
+
+        task_name_override = data.get('task_name')
+        if isinstance(task_name_override, str) and task_name_override.strip():
+            task_name = task_name_override.strip()
+        else:
+            task_name = task.get('name') or f'Task #{task_id}'
+
+        tags_override = data.get('tags')
+        if tags_override is not None:
+            tags = normalize_tags(tags_override)
+        else:
+            tags = task.get('tags') or []
+
+        comparison_data = task.get('comparison')
+        enable_comparison_override = data.get('enable_comparison')
+        if enable_comparison_override is None:
+            if comparison_data and isinstance(comparison_data, dict):
+                enable_comparison = 'error' not in comparison_data
+            else:
+                enable_comparison = len(urls) > 1
+        else:
+            enable_comparison = bool(enable_comparison_override)
+
+        # Reset task status and clear old results
+        db.update_task(task_id, {
+            'status': 'processing',
+            'name': task_name,
+            'urls': urls,
+            'instruction': instruction,
+            'domain': domain,
+            'tags': tags,
+            'results': None,
+            'errors': None,
+            'comparison': None,
+            'completed_at': None,
+            'progress': None,
+            'current_url_index': 0,
+            'total_urls': len(urls),
+            'estimated_time_remaining': None
+        })
+        
+        # Start scraping with domain-specific prompts and progress tracking
+        results = []
+        errors = []
+        start_time = datetime.now()
+        detected_languages = []
+        
+        for idx, url in enumerate(urls):
+            try:
+                # Update progress
+                progress = {
+                    'current': idx + 1,
+                    'total': len(urls),
+                    'current_url': url,
+                    'stage': 'scraping',
+                    'message': f'Scraping URL {idx + 1}/{len(urls)}: {url}'
+                }
+                db.update_task(task_id, {
+                    'current_url_index': idx + 1,
+                    'progress': progress
+                })
+                
+                # Get domain-specific prompt
+                domain_prompt = DomainAnalyzer.get_domain_prompt(domain, instruction)
+                
+                # Progress callback
+                def progress_callback(update):
+                    progress['stage'] = update.get('stage', 'scraping')
+                    progress['message'] = update.get('message', progress['message'])
+                    progress['current'] = idx + 1
+                    progress['total'] = len(urls)
+                    progress['current_url'] = url
+                    db.update_task(task_id, {'progress': progress, 'current_url_index': idx + 1})
+                
+                result = scraper.scrape_url(url, domain_prompt, user_instruction=instruction, domain=domain, progress_callback=progress_callback)
+                
+                # Track detected language
+                if result.get('language'):
+                    detected_languages.append(result['language'])
+                
+                results.append({
+                    'url': url,
+                    'status': 'success',
+                    'data': result
+                })
+                
+                # Estimate time remaining
+                elapsed = (datetime.now() - start_time).total_seconds()
+                avg_time_per_url = elapsed / (idx + 1)
+                remaining_urls = len(urls) - (idx + 1)
+                estimated_remaining = int(avg_time_per_url * remaining_urls)
+                db.update_task(task_id, {'estimated_time_remaining': estimated_remaining})
+                
+            except Exception as e:
+                errors.append({
+                    'url': url,
+                    'error': str(e)
+                })
+                results.append({
+                    'url': url,
+                    'status': 'error',
+                    'error': str(e)
+                })
+        
+        # Generate comparison if enabled and we have at least 2 successful results
+        comparison = None
+        if enable_comparison and len(urls) > 1:
+            successful_results = [r for r in results if r.get('status') == 'success']
+            if len(successful_results) >= 2:
+                try:
+                    db.update_task(task_id, {
+                        'progress': {
+                            'stage': 'comparing',
+                            'message': 'Generating comparison...',
+                            'current': len(urls),
+                            'total': len(urls)
+                        }
+                    })
+                    comparison = scraper.generate_comparison(successful_results, domain, user_instruction=instruction)
+                except Exception as e:
+                    comparison = {'error': f'Comparison generation failed: {str(e)}'}
+        
+        # Determine primary language
+        primary_language = max(set(detected_languages), key=detected_languages.count) if detected_languages else 'en'
+        
+        # Update task with results
+        db.update_task(task_id, {
+            'results': json.dumps(results),
+            'errors': json.dumps(errors),
+            'status': 'completed' if results else 'error',
+            'completed_at': datetime.now().isoformat(),
+            'language': primary_language,
+            'progress': None,
+            'estimated_time_remaining': None
+        })
+        
+        # Save comparison if generated
+        if comparison:
+            db.update_task(task_id, {'comparison': json.dumps(comparison)})
+        
+        return jsonify({
+            'task_id': task_id,
+            'message': 'Analysis re-run completed successfully',
+            'status': 'completed' if results else 'error'
+        })
+        
+    except Exception as e:
+        db.update_task(task_id, {'status': 'error'})
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/schedule', methods=['POST'])
 def schedule_task():
     """Schedule a recurring scraping task."""

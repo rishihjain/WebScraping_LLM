@@ -225,6 +225,71 @@ class DomainAnalyzer:
             ],
             'qna_style': 'Answer as an events analyst evaluating conferences and gatherings.'
         },
+        'documentation': {
+            'name': 'Software Documentation',
+            'parameters': [
+                'api_name', 'endpoint', 'method', 'parameters', 'response_format',
+                'code_examples', 'version', 'deprecation_status', 'authentication',
+                'rate_limits', 'error_codes', 'tutorials', 'code_snippets'
+            ],
+            'analysis_focus': [
+                'API completeness', 'code example quality', 'documentation clarity',
+                'version compatibility', 'developer experience'
+            ],
+            'qna_style': 'Answer as a technical documentation analyst focusing on API details and code examples.'
+        },
+        'research': {
+            'name': 'Research & Academic',
+            'parameters': [
+                'paper_title', 'authors', 'publication_date', 'journal', 'doi',
+                'abstract', 'keywords', 'citations', 'download_link', 'methodology',
+                'findings', 'references', 'code_repository'
+            ],
+            'analysis_focus': [
+                'research quality indicators', 'citation impact', 'methodology rigor',
+                'novelty of findings', 'publication credibility'
+            ],
+            'qna_style': 'Answer as a research analyst evaluating academic papers and scientific content.'
+        },
+        'finance': {
+            'name': 'Financial Markets',
+            'parameters': [
+                'symbol', 'company_name', 'current_price', 'change_percent', 'volume',
+                'market_cap', 'pe_ratio', 'dividend_yield', '52_week_high', '52_week_low',
+                'news', 'analyst_ratings', 'financial_statements'
+            ],
+            'analysis_focus': [
+                'price trends', 'valuation metrics', 'analyst sentiment',
+                'market performance', 'investment signals'
+            ],
+            'qna_style': 'Answer as a financial analyst evaluating market data and investment opportunities.'
+        },
+        'recipes': {
+            'name': 'Recipes & Cooking',
+            'parameters': [
+                'recipe_name', 'cuisine_type', 'prep_time', 'cook_time', 'servings',
+                'ingredients', 'instructions', 'nutrition_info', 'difficulty', 'rating',
+                'reviews', 'images', 'tags'
+            ],
+            'analysis_focus': [
+                'recipe complexity', 'ingredient availability', 'cooking time efficiency',
+                'nutritional value', 'user satisfaction'
+            ],
+            'qna_style': 'Answer as a culinary analyst evaluating recipes and cooking instructions.'
+        },
+        'forums': {
+            'name': 'Forums & Discussions',
+            'parameters': [
+                'thread_title', 'author', 'post_date', 'content', 'replies_count',
+                'views', 'tags', 'category', 'upvotes', 'best_answer', 'thread_status',
+                'code_examples'
+            ],
+            'analysis_focus': [
+                'discussion quality', 'community engagement', 'expertise level',
+                'problem resolution', 'trending topics'
+            ],
+            'qna_style': 'Answer as a community analyst evaluating forum discussions and user engagement.'
+        },
         'general': {
             'name': 'General',
             'parameters': ['title', 'content', 'images', 'links', 'metadata'],
@@ -332,6 +397,27 @@ Return ONLY valid JSON without markdown fences."""
         
         language_note = f"\nNote: The extracted data may contain content in {language.upper()} language. Please provide analysis in the same language or as requested by the user." if language != 'en' else ""
 
+        # Detect if user instruction requires code, complexity, or use cases
+        instruction_lower = (instruction or '').lower()
+        needs_code = any(keyword in instruction_lower for keyword in [
+            'code', 'algorithm', 'implementation', 'snippet', 'program', 'source code'
+        ])
+        needs_complexity = any(keyword in instruction_lower for keyword in [
+            'complexity', 'big o', 'time complexity', 'space complexity', 'o(n)', 'asymptotic'
+        ])
+        needs_use_cases = any(keyword in instruction_lower for keyword in [
+            'use case', 'practical', 'application', 'where to use', 'when to use', 'practical life'
+        ])
+
+        # Add emphasis to analysis template
+        emphasis_note = ""
+        if needs_code:
+            emphasis_note += "\n\nIMPORTANT: The user specifically requested CODE. Ensure 'user_request_answer' includes actual code snippets or algorithm implementations from the extracted data, not just descriptions. If code is present in extracted_data, include it verbatim."
+        if needs_complexity:
+            emphasis_note += "\n\nIMPORTANT: The user specifically requested COMPLEXITY ANALYSIS. Ensure 'user_request_answer' includes Big O notation (time and space complexity) with clear explanations. Extract complexity information from the extracted data."
+        if needs_use_cases:
+            emphasis_note += "\n\nIMPORTANT: The user specifically requested PRACTICAL USE CASES. Ensure 'user_request_answer' includes real-world applications and scenarios where this is used. Extract use cases from the extracted data."
+
         return DomainAnalyzer.ANALYSIS_TEMPLATE.format(
             domain_name=domain_info['name'],
             extracted_data=serialized,
@@ -339,7 +425,7 @@ Return ONLY valid JSON without markdown fences."""
             focus_1=focus[0],
             focus_2=focus[1] if len(focus) > 1 else focus[0],
             focus_3=focus[2] if len(focus) > 2 else focus[0],
-        ) + language_note
+        ) + language_note + emphasis_note
 
     @staticmethod
     def build_qna_prompt(domain: str, aggregated_results: List[Dict[str, Any]], question: str, user_instruction: str = '') -> str:
@@ -439,10 +525,32 @@ Return ONLY valid JSON without markdown fences."""
         comparison_json = json.dumps(comparison_payload, indent=2, ensure_ascii=False)[:5000]
         individual_answers_json = json.dumps(individual_answers, indent=2, ensure_ascii=False)[:2000]
 
+        # Detect if user instruction requires code, complexity, or use cases
+        instruction_lower = (user_instruction or '').lower()
+        needs_code = any(keyword in instruction_lower for keyword in [
+            'code', 'algorithm', 'implementation', 'snippet', 'program', 'source code'
+        ])
+        needs_complexity = any(keyword in instruction_lower for keyword in [
+            'complexity', 'big o', 'time complexity', 'space complexity', 'o(n)', 'asymptotic'
+        ])
+        needs_use_cases = any(keyword in instruction_lower for keyword in [
+            'use case', 'practical', 'application', 'where to use', 'when to use', 'practical life'
+        ])
+
+        # Add emphasis for code/complexity/use cases
+        emphasis = ""
+        if needs_code:
+            emphasis += "\nCRITICAL: User requested CODE. Extract and compare code implementations from all websites. Include actual code snippets in the comparison. If code is missing from any website, clearly state that.\n"
+        if needs_complexity:
+            emphasis += "\nCRITICAL: User requested COMPLEXITY ANALYSIS. Extract and compare time/space complexity (Big O notation) from all websites. If complexity analysis is missing, note it clearly.\n"
+        if needs_use_cases:
+            emphasis += "\nCRITICAL: User requested PRACTICAL USE CASES. Extract and synthesize real-world applications and scenarios from all websites. Compare use cases across websites.\n"
+
         # Enhanced comparison prompt with cross-website extraction recommendation
         comparison_prompt = (
             f"You are comparing {len(all_results)} {domain_info['name']} websites.\n\n"
             f"User's Original Request/Instruction: {user_instruction or 'Extract and analyze relevant information from these websites'}\n\n"
+            f"{emphasis}\n"
             f"Comparison Data (JSON):\n{comparison_json}\n\n"
             f"Individual Website Answers to User Request:\n{individual_answers_json}\n\n"
             "Based on the user's request and the data from all websites, provide a comprehensive comparison.\n\n"

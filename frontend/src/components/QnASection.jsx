@@ -1,10 +1,33 @@
 import { useState, useEffect } from 'react';
 import { renderInlineMarkdown } from '../utils/markdown.jsx';
 
+// Helper function to parse supporting points and remove URLs
+const parseSupportingPoint = (point) => {
+  // Remove all URLs from the point
+  const urlPattern = /(https?:\/\/[^\s\)]+)/g;
+  let text = point.replace(urlPattern, '').trim();
+  
+  // Clean up common patterns
+  text = text
+    .replace(/^from\s+/i, '')
+    .replace(/\s*\(.*?\)\s*/g, '')
+    .replace(/\s*\[.*?\]\s*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  
+  // If text is empty after removing URLs, provide a default
+  if (!text) {
+    text = 'Evidence from source';
+  }
+  
+  return text;
+};
+
 const QnASection = ({ taskId, onAsk }) => {
   const [question, setQuestion] = useState('');
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [expandedSupportingPoints, setExpandedSupportingPoints] = useState({});
 
   // Load chat history from localStorage on mount
   useEffect(() => {
@@ -100,12 +123,31 @@ const QnASection = ({ taskId, onAsk }) => {
             </div>
             {item.supporting_points?.length > 0 && (
               <div className="qna-supporting">
-                <strong>Supporting Points:</strong>
-                <ul>
-                  {item.supporting_points.map((point, pointIdx) => (
-                    <li key={pointIdx}>{renderInlineMarkdown(point)}</li>
-                  ))}
-                </ul>
+                <button
+                  className="supporting-points-toggle"
+                  onClick={() => setExpandedSupportingPoints(prev => ({
+                    ...prev,
+                    [idx]: !prev[idx]
+                  }))}
+                  type="button"
+                >
+                  <span>{expandedSupportingPoints[idx] ? '▼' : '▶'}</span>
+                  <strong>Supporting Points ({item.supporting_points.length})</strong>
+                </button>
+                {expandedSupportingPoints[idx] && (
+                  <ul className="supporting-points-list">
+                    {item.supporting_points.map((point, pointIdx) => {
+                      const cleanText = parseSupportingPoint(point);
+                      return (
+                        <li key={pointIdx} className="supporting-point-item">
+                          <div className="supporting-point-text">
+                            {renderInlineMarkdown(cleanText)}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
               </div>
             )}
             <div className="qna-meta">

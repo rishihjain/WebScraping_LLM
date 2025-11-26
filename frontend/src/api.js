@@ -50,3 +50,6 @@ export const updateTaskTags = (taskId, tags) =>
 export const getTaskProgress = (taskId) => 
   api.get(`/tasks/${taskId}/progress`).then((res) => res.data);
 
+export const rerunTask = (taskId, payload = {}) => 
+  api.post(`/tasks/${taskId}/rerun`, payload).then((res) => res.data);
+

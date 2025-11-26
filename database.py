@@ -100,7 +100,7 @@ class Database:
         
         for key, value in updates.items():
             # Convert complex types to JSON strings for TEXT columns
-            if key in ['results', 'errors', 'comparison', 'tags', 'progress']:
+            if key in ['results', 'errors', 'comparison', 'tags', 'progress', 'urls']:
                 if value is not None:
                     if isinstance(value, (dict, list)):
                         value = json.dumps(value)

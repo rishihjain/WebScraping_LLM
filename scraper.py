@@ -44,14 +44,25 @@ class WebScraper:
             if progress_callback:
                 progress_callback({'stage': 'cleaning', 'message': f'Processing content (Language: {detected_language})...'})
             
-            # Clean HTML for LLM processing
-            cleaned_html = self._clean_html(soup)
+            # Extract Schema.org structured data first (most reliable)
+            schema_info = self._extract_schema_org(soup)
+            
+            # Clean HTML for LLM processing (pass schema_info to avoid duplicate extraction)
+            cleaned_html = self._clean_html(soup, schema_info)
             
             if progress_callback:
                 progress_callback({'stage': 'extracting', 'message': 'Extracting data with AI...'})
             
             # Use LLM to understand what to extract (multilingual support)
-            extracted_data = self._extract_with_llm(cleaned_html, extraction_prompt, url, detected_language)
+            extracted_data = self._extract_with_llm(cleaned_html, extraction_prompt, url, detected_language, domain)
+            
+            # Merge Schema.org product data with LLM extraction (Schema.org takes priority)
+            if schema_info.get('product_data'):
+                product_data = schema_info['product_data']
+                # Merge: Schema.org data overrides LLM data for critical fields
+                for key, value in product_data.items():
+                    if value:  # Only override if Schema.org has a value
+                        extracted_data[key] = value
 
             if progress_callback:
                 progress_callback({'stage': 'analyzing', 'message': 'Generating insights...'})
@@ -99,7 +110,19 @@ class WebScraper:
             'zh': ['的', '一', '是', '在', '不', '了', '有', '和', '人', '这', '中', '大'],
             'ja': ['の', 'に', 'は', 'を', 'た', 'が', 'で', 'て', 'と', 'し', 'れ', 'さ'],
             'ko': ['이', '가', '을', '를', '에', '의', '와', '과', '도', '로', '에서', '부터'],
-            'ar': ['في', 'من', 'إلى', 'على', 'أن', 'هو', 'هي', 'كان', 'كانت', 'مع', 'هذا', 'هذه']
+            'ar': ['في', 'من', 'إلى', 'على', 'أن', 'هو', 'هي', 'كان', 'كانت', 'مع', 'هذا', 'هذه'],
+            # Indian languages
+            'hi': ['की', 'के', 'में', 'है', 'हैं', 'को', 'से', 'पर', 'या', 'और', 'यह', 'वह', 'इस', 'उस'],
+            'mr': ['चा', 'ची', 'चे', 'मध्ये', 'आहे', 'आणि', 'किंवा', 'हे', 'ते', 'या', 'तो', 'ती'],
+            'gu': ['નું', 'ના', 'ની', 'માં', 'છે', 'અને', 'અથવા', 'આ', 'તે', 'એ', 'એક', 'બે'],
+            'bn': ['এর', 'এ', 'হয়', 'এবং', 'বা', 'এই', 'সে', 'একটি', 'করে', 'হবে', 'হয়েছে', 'করতে'],
+            'te': ['లో', 'కు', 'ని', 'అని', 'మరియు', 'లేదా', 'ఈ', 'ఆ', 'ఒక', 'కు', 'గా', 'చే'],
+            'ta': ['ல்', 'க்கு', 'ஐ', 'ஆக', 'மற்றும்', 'அல்லது', 'இந்த', 'அந்த', 'ஒரு', 'செய்ய', 'உள்ளது', 'இருக்கிறது'],
+            'kn': ['ದ', 'ದಲ್ಲಿ', 'ಗೆ', 'ಅನ್ನು', 'ಮತ್ತು', 'ಅಥವಾ', 'ಈ', 'ಆ', 'ಒಂದು', 'ಮಾಡಲು', 'ಇದೆ', 'ಆಗಿದೆ'],
+            'ml': ['യുടെ', 'ൽ', 'ക്ക്', 'ആണ്', 'ഉം', 'അല്ലെങ്കിൽ', 'ഈ', 'ആ', 'ഒരു', 'ചെയ്യാൻ', 'ഉണ്ട്', 'ആയി'],
+            'pa': ['ਦਾ', 'ਦੀ', 'ਦੇ', 'ਵਿੱਚ', 'ਹੈ', 'ਅਤੇ', 'ਜਾਂ', 'ਇਹ', 'ਉਹ', 'ਇੱਕ', 'ਕਰਨ', 'ਲਈ'],
+            'or': ['ର', 'ରେ', 'କୁ', 'ହେଉଛି', 'ଏବଂ', 'କିମ୍ବା', 'ଏହି', 'ସେ', 'ଏକ', 'କରିବା', 'ଅଛି', 'ହେବ'],
+            'ur': ['کا', 'کی', 'کے', 'میں', 'ہے', 'اور', 'یا', 'یہ', 'وہ', 'ایک', 'کرنے', 'کے لیے']
         }
         
         text_lower = text_content.lower()
@@ -134,7 +157,7 @@ class WebScraper:
                 raise Exception(f"Failed to fetch page with browser automation: {str(playwright_error)}. Also tried simple HTTP request but failed: {str(requests_error)}")
     
     def _fetch_with_playwright(self, url: str) -> str:
-        """Fetch page using Playwright (handles JavaScript)."""
+        """Fetch page using Playwright with smart waiting for dynamic content."""
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
@@ -144,22 +167,31 @@ class WebScraper:
             page = context.new_page()
             
             try:
-                # Try with networkidle first, but with longer timeout
+                # Load page
                 try:
-                    page.goto(url, wait_until='networkidle', timeout=60000)
+                    page.goto(url, wait_until='domcontentloaded', timeout=60000)
                 except Exception:
-                    # Fallback: try with domcontentloaded (faster, less reliable)
-                    try:
-                        page.goto(url, wait_until='domcontentloaded', timeout=60000)
-                        # Wait for network to settle
-                        page.wait_for_timeout(5000)
-                    except Exception:
-                        # Last resort: just load the page
-                        page.goto(url, timeout=60000)
-                        page.wait_for_timeout(5000)
+                    # Fallback: just load the page
+                    page.goto(url, timeout=60000)
                 
-                # Wait a bit more for dynamic content
-                page.wait_for_timeout(3000)
+                # Wait for critical e-commerce elements (price, rating) to appear
+                # This handles Amazon and similar sites that load prices dynamically
+                try:
+                    # Wait for price or rating elements (up to 10 seconds)
+                    # Common selectors for Amazon and other e-commerce sites
+                    page.wait_for_selector(
+                        'span[class*="price"], span[class*="Price"], .a-price, [data-asin-price], '
+                        'span[class*="rating"], [aria-label*="star"], .a-icon-alt, '
+                        '[data-hook*="review"], script[type="application/ld+json"]',
+                        timeout=10000
+                    )
+                except Exception:
+                    # Continue even if selectors not found (page might not be e-commerce)
+                    pass
+                
+                # Wait for network to settle and dynamic content to load
+                page.wait_for_timeout(5000)
+                
                 html_content = page.content()
             except Exception as e:
                 error_msg = str(e)
@@ -195,7 +227,7 @@ class WebScraper:
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         
-        try:
+        try:    
             response = session.get(url, headers=headers, timeout=30, allow_redirects=True)
             response.raise_for_status()
             
@@ -210,37 +242,206 @@ class WebScraper:
         except requests.exceptions.RequestException as e:
             raise Exception(f"HTTP request failed: {str(e)}")
     
-    def _clean_html(self, soup: BeautifulSoup) -> str:
-        """Clean HTML to remove scripts, styles, and unnecessary elements."""
-        # Remove script and style elements
-        for script in soup(["script", "style", "meta", "link", "noscript"]):
+    def _extract_schema_org(self, soup: BeautifulSoup) -> Dict[str, Any]:
+        """Extract Schema.org structured data (most reliable source for e-commerce data)."""
+        schema_data = {}
+        
+        # Extract JSON-LD scripts (Schema.org)
+        json_ld_scripts = soup.find_all('script', type='application/ld+json')
+        for script in json_ld_scripts:
+            try:
+                data = json.loads(script.string)
+                if isinstance(data, dict):
+                    schema_type = data.get('@type', 'Unknown')
+                    if schema_type not in schema_data:
+                        schema_data[schema_type] = []
+                    schema_data[schema_type].append(data)
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            schema_type = item.get('@type', 'Unknown')
+                            if schema_type not in schema_data:
+                                schema_data[schema_type] = []
+                            schema_data[schema_type].append(item)
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        
+        # Extract Product schema data (most important for e-commerce)
+        product_data = {}
+        if 'Product' in schema_data:
+            for product in schema_data['Product']:
+                # Extract price
+                offers = product.get('offers', {})
+                if isinstance(offers, dict):
+                    price = offers.get('price') or offers.get('priceCurrency')
+                    if price:
+                        product_data['price'] = price
+                    availability = offers.get('availability')
+                    if availability:
+                        product_data['availability'] = availability
+                elif isinstance(offers, list) and len(offers) > 0:
+                    offer = offers[0]
+                    if isinstance(offer, dict):
+                        price = offer.get('price')
+                        if price:
+                            product_data['price'] = price
+                        availability = offer.get('availability')
+                        if availability:
+                            product_data['availability'] = availability
+                
+                # Extract rating
+                aggregate_rating = product.get('aggregateRating', {})
+                if isinstance(aggregate_rating, dict):
+                    rating = aggregate_rating.get('ratingValue')
+                    if rating:
+                        product_data['rating'] = rating
+                    review_count = aggregate_rating.get('reviewCount')
+                    if review_count:
+                        product_data['reviews_count'] = review_count
+                
+                # Extract other product fields
+                if product.get('name'):
+                    product_data['product_name'] = product.get('name')
+                if product.get('description'):
+                    product_data['description'] = product.get('description')
+                if product.get('brand'):
+                    brand = product.get('brand')
+                    if isinstance(brand, dict):
+                        product_data['brand'] = brand.get('name', '')
+                    else:
+                        product_data['brand'] = str(brand)
+        
+        return {
+            'schema_data': schema_data,
+            'product_data': product_data
+        }
+    
+    def _clean_html(self, soup: BeautifulSoup, schema_info: Dict[str, Any] = None) -> str:
+        """Clean HTML while preserving critical e-commerce elements (price, rating, reviews)."""
+        # Use provided schema_info or extract it
+        if schema_info is None:
+            schema_info = self._extract_schema_org(soup)
+        
+        # Remove only truly unnecessary elements (keep JSON-LD scripts for now)
+        for script in soup(["style", "noscript"]):
             script.decompose()
+        
+        # Remove regular scripts but keep JSON-LD
+        for script in soup.find_all('script'):
+            if script.get('type') != 'application/ld+json':
+                script.decompose()
         
         # Get text content with structure
         text_content = []
         
-        # Extract headings (limit to avoid too much content)
+        # PRIORITY 0: Extract code blocks FIRST (before other content) - critical for algorithm/code extraction
+        code_blocks = []
+        for code_elem in soup.find_all(['pre', 'code', 'textarea']):
+            code_text = code_elem.get_text(separator='\n', strip=False)
+            if code_text and len(code_text) > 20:  # Only meaningful code blocks
+                # Preserve code formatting and indentation
+                code_blocks.append(f"CODE_BLOCK: {code_text[:2000]}")  # Limit each block to 2000 chars
+        # Add code blocks to text_content (they'll be prioritized)
+        text_content.extend(code_blocks[:10])  # Limit to 10 code blocks
+        
+        # PRIORITY 1: Add Schema.org structured data (most reliable)
+        if schema_info.get('schema_data'):
+            for schema_type, items in schema_info['schema_data'].items():
+                for item in items[:2]:  # Limit to first 2 items per type
+                    try:
+                        text_content.append(f"STRUCTURED_DATA ({schema_type}): {json.dumps(item, ensure_ascii=False)[:1000]}")
+                    except:
+                        pass
+        
+        # PRIORITY 2: Extract price elements (common selectors for e-commerce)
+        price_selectors = [
+            'span[class*="price"]', 'span[class*="Price"]', 
+            'span[id*="price"]', 'div[class*="price"]',
+            '.a-price', '.a-offscreen', '[data-asin-price]',
+            '[data-price]', '.price', '.product-price'
+        ]
+        prices_found = set()
+        for selector in price_selectors:
+            try:
+                prices = soup.select(selector)
+                for price in prices[:10]:  # Limit to avoid duplicates
+                    text = price.get_text(strip=True)
+                    if text and any(char.isdigit() for char in text):
+                        # Normalize price text
+                        price_text = re.sub(r'\s+', ' ', text)
+                        if price_text not in prices_found and len(price_text) < 100:
+                            prices_found.add(price_text)
+                            text_content.append(f"PRICE: {price_text}")
+            except Exception:
+                pass
+        
+        # PRIORITY 3: Extract rating elements
+        rating_selectors = [
+            'span[class*="rating"]', 'span[class*="Rating"]',
+            '[aria-label*="star"]', '.a-icon-alt', '[data-rating]',
+            '.rating', '[class*="star"]'
+        ]
+        ratings_found = set()
+        for selector in rating_selectors:
+            try:
+                ratings = soup.select(selector)
+                for rating in ratings[:10]:
+                    text = rating.get_text(strip=True)
+                    aria_label = rating.get('aria-label', '')
+                    if aria_label:
+                        text = aria_label
+                    if text and ('star' in text.lower() or any(char.isdigit() for char in text)):
+                        rating_text = re.sub(r'\s+', ' ', text.strip())
+                        if rating_text not in ratings_found and len(rating_text) < 100:
+                            ratings_found.add(rating_text)
+                            text_content.append(f"RATING: {rating_text}")
+            except Exception:
+                pass
+        
+        # PRIORITY 4: Extract review count
+        review_selectors = [
+            'span[class*="review"]', 'span[id*="review"]',
+            'a[href*="review"]', '[data-hook*="review"]',
+            '[class*="review-count"]', '[id*="review"]'
+        ]
+        reviews_found = set()
+        for selector in review_selectors:
+            try:
+                reviews = soup.select(selector)
+                for review in reviews[:10]:
+                    text = review.get_text(strip=True)
+                    if text and any(char.isdigit() for char in text):
+                        # Look for patterns like "1,234 ratings" or "500+ reviews"
+                        if re.search(r'\d+[,\d]*\s*(rating|review|customer)', text, re.IGNORECASE):
+                            review_text = re.sub(r'\s+', ' ', text.strip())
+                            if review_text not in reviews_found and len(review_text) < 100:
+                                reviews_found.add(review_text)
+                                text_content.append(f"REVIEWS: {review_text}")
+            except Exception:
+                pass
+        
+        # PRIORITY 5: Extract headings (limit to avoid too much content)
         headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])[:50]
         for heading in headings:
             text = heading.get_text(strip=True)
             if text:
                 text_content.append(f"HEADING: {text}")
         
-        # Extract paragraphs (limit to most relevant)
+        # PRIORITY 6: Extract paragraphs (limit to most relevant)
         paragraphs = soup.find_all('p')[:100]
         for p in paragraphs:
             text = p.get_text(strip=True)
             if text and len(text) > 10:
                 text_content.append(f"PARAGRAPH: {text[:500]}")  # Limit paragraph length
         
-        # Extract lists
+        # PRIORITY 7: Extract lists
         lists = soup.find_all(['ul', 'ol'])[:20]
         for ul in lists:
             items = [li.get_text(strip=True)[:200] for li in ul.find_all('li')[:50]]
             if items:
                 text_content.append(f"LIST: {' | '.join(items)}")
         
-        # Extract tables
+        # PRIORITY 8: Extract tables
         tables = soup.find_all('table')[:10]
         for table in tables:
             rows = []
@@ -251,7 +452,7 @@ class WebScraper:
             if rows:
                 text_content.append(f"TABLE: {' || '.join(rows)}")
         
-        # Extract important links (limit)
+        # PRIORITY 9: Extract important links (limit)
         links = soup.find_all('a', href=True)[:50]
         for a in links:
             text = a.get_text(strip=True)
@@ -262,47 +463,160 @@ class WebScraper:
         
         result = '\n'.join(text_content)
         
-        # Limit total content size for LLM
-        if len(result) > 10000:
-            result = result[:10000] + "\n... (content truncated)"
+        # Increase limit for LLM (was 10000, now 15000 to include more structured data)
+        if len(result) > 15000:
+            # Prioritize: keep code blocks, structured data, prices, ratings, reviews, then truncate rest
+            priority_lines = [line for line in text_content if any(
+                keyword in line for keyword in ['CODE_BLOCK:', 'STRUCTURED_DATA', 'PRICE:', 'RATING:', 'REVIEWS:']
+            )]
+            other_lines = [line for line in text_content if line not in priority_lines]
+            
+            # Keep all priority lines + as many other lines as fit
+            result_lines = priority_lines
+            remaining_chars = 15000 - len('\n'.join(priority_lines))
+            for line in other_lines:
+                if len('\n'.join(result_lines) + '\n' + line) <= remaining_chars:
+                    result_lines.append(line)
+                else:
+                    break
+            result = '\n'.join(result_lines) + "\n... (content truncated)"
         
         return result if result else "No extractable content found on this page."
     
-    def _extract_with_llm(self, cleaned_html: str, instruction: str, url: str, language: str = 'en') -> Dict[str, Any]:
-        """Use LLM to extract data based on natural language instruction. Supports multilingual content."""
+    def _extract_with_llm(self, cleaned_html: str, instruction: str, url: str, language: str = 'en', domain: str = 'general') -> Dict[str, Any]:
+        """Use LLM to extract data based on natural language instruction. Supports multilingual content and domain-specific extraction."""
         language_note = f"\nNote: This webpage appears to be in {language.upper()} language. Please extract data accordingly, maintaining the original language of the content unless the user specifically requests translation." if language != 'en' else ""
         
+        # Add critical fields emphasis for e-commerce
+        critical_fields_note = ""
+        if domain == 'ecommerce':
+            critical_fields_note = """
+CRITICAL EXTRACTION REQUIREMENTS FOR E-COMMERCE:
+You MUST extract these fields even if not explicitly requested:
+- price: Look in STRUCTURED_DATA first (most reliable), then PRICE tags, or text containing currency symbols (₹, $, €, £, ¥)
+- rating: Look in STRUCTURED_DATA, RATING tags, star ratings (e.g., "4.5 out of 5", "4.5 stars"), or numeric ratings
+- reviews_count: Look in STRUCTURED_DATA, REVIEWS tags, or numbers followed by "review", "rating", "customer"
+- discount: Percentage off, sale price vs regular price, promotional text
+- availability: "in stock", "out of stock", "limited stock", availability status
+
+EXTRACTION PRIORITY:
+1. STRUCTURED_DATA (JSON-LD) - Most reliable, use this first
+2. PRICE, RATING, REVIEWS tags - Explicitly marked in content
+3. Text patterns - Currency symbols, star ratings, review counts
+
+If price/rating/reviews are missing, search more carefully. They are often in:
+- JSON-LD structured data (check STRUCTURED_DATA tags)
+- Span/div elements with price/rating classes
+- Data attributes
+- Text patterns like "₹", "$", "stars", "out of 5", "ratings", "reviews"
+
+Return these fields even if the user instruction doesn't explicitly ask for them.
+"""
+        
+        # Detect user intent for code, complexity, or use cases
+        instruction_lower = instruction.lower()
+        needs_code = any(keyword in instruction_lower for keyword in [
+            'code', 'algorithm', 'implementation', 'snippet', 'program', 
+            'source code', 'coding', 'programming'
+        ])
+        needs_complexity = any(keyword in instruction_lower for keyword in [
+            'complexity', 'big o', 'time complexity', 'space complexity', 
+            'o(n)', 'asymptotic', 'performance', 'efficiency'
+        ])
+        needs_use_cases = any(keyword in instruction_lower for keyword in [
+            'use case', 'practical', 'application', 'where to use', 
+            'when to use', 'scenario', 'real world', 'practical life'
+        ])
+        
+        # Add specialized extraction requirements
+        specialized_extraction_note = ""
+        if needs_code:
+            specialized_extraction_note += """
+CRITICAL: USER REQUESTED CODE/ALGORITHM EXTRACTION
+- Extract ALL code blocks, code snippets, and algorithm implementations
+- Look for: CODE_BLOCK tags, <pre>, <code>, code blocks, algorithm pseudocode, implementation details
+- Preserve code formatting, indentation, and syntax
+- Extract complete code, not just descriptions
+- Include code in fields like: "code", "algorithm_code", "implementation", "code_snippet"
+- If multiple algorithms are mentioned, extract code for each separately
+- Code is MANDATORY - extract it even if it's incomplete or partial
+
+"""
+        if needs_complexity:
+            specialized_extraction_note += """
+CRITICAL: USER REQUESTED COMPLEXITY ANALYSIS
+- Extract time complexity (Big O notation: O(n), O(n²), O(log n), O(1), etc.)
+- Extract space complexity (memory requirements)
+- Look for: "O(", "Big O", "time complexity", "space complexity", "asymptotic", "worst case", "best case"
+- Extract complexity analysis even if it's informal (e.g., "linear time", "quadratic", "logarithmic")
+- Include in fields like: "time_complexity", "space_complexity", "complexity_analysis", "big_o_notation"
+- Complexity analysis is MANDATORY - extract it even if it's not explicitly stated
+
+"""
+        if needs_use_cases:
+            specialized_extraction_note += """
+CRITICAL: USER REQUESTED PRACTICAL USE CASES
+- Extract real-world applications, use cases, scenarios
+- Look for: "use case", "application", "when to use", "practical", "real world", "example", "scenario"
+- Extract specific scenarios where the algorithm/technique is applicable
+- Include in fields like: "use_cases", "applications", "practical_scenarios", "when_to_use", "real_world_examples"
+- Use cases are MANDATORY - extract them even if they're not explicitly listed
+
+"""
+        
         prompt = f"""You are a web scraping assistant. Extract data from the following webpage content based on the user's instruction.
+{critical_fields_note}
+{specialized_extraction_note}
 {language_note}
 
 URL: {url}
 User Instruction: {instruction}
 
 Webpage Content:
-{cleaned_html[:8000]}  # Limit content to avoid token limits
+{cleaned_html[:12000]}  # Increased limit to include more structured data
 
 Please extract the requested data and return it as a JSON object. The JSON should have clear field names based on what was requested.
-For example, if the user asks for "product names and prices", return:
+
+For e-commerce pages, ALWAYS extract:
+- product_name (or name)
+- price (with currency symbol if available)
+- rating (numeric, e.g., 4.5)
+- reviews_count (numeric, e.g., 1234)
+- discount (if available)
+- availability (if available)
+
+Example for e-commerce:
 {{
-  "product_names": ["Product 1", "Product 2"],
-  "prices": ["$10", "$20"]
+  "product_name": "Product Name",
+  "price": "₹1,999",
+  "rating": 4.5,
+  "reviews_count": 1234,
+  "discount": "20% off",
+  "availability": "In stock"
 }}
 
-If the user asks for "all headings", return:
+For general pages:
 {{
-  "headings": ["Heading 1", "Heading 2"]
+  "headings": ["Heading 1", "Heading 2"],
+  "content": "Main content..."
 }}
 
 Be intelligent about identifying:
+- Code blocks and algorithms (look for CODE_BLOCK tags, preserve formatting)
 - Tables (return as arrays of objects)
 - Lists (return as arrays)
-- Prices (extract numbers and currency symbols, handle different currencies)
+- Prices (extract numbers and currency symbols, handle different currencies: ₹, $, €, £, ¥)
 - Reviews (extract review text and ratings)
 - Headings (h1, h2, h3, etc.)
 - Links
+- Complexity notation (Big O, time/space complexity)
+- Use cases and practical applications
 - Any other structured data
 
-IMPORTANT: If the content is in a language other than English, preserve the original language in the extracted data unless the user specifically requests translation.
+IMPORTANT: 
+- If the content is in a language other than English, preserve the original language in the extracted data unless the user specifically requests translation.
+- For e-commerce: price, rating, and reviews_count are MANDATORY - extract them even if not explicitly requested.
+- Check STRUCTURED_DATA tags first as they contain the most reliable information.
 
 Return ONLY valid JSON, no additional text or markdown formatting."""
 
